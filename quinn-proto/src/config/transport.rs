@@ -48,6 +48,10 @@ pub struct TransportConfig {
     pub(crate) allow_spin: bool,
     pub(crate) datagram_receive_buffer_size: Option<usize>,
     pub(crate) datagram_send_buffer_size: usize,
+    pub(crate) schc_enabled: bool,
+    pub(crate) schc_profile_id: VarInt,
+    pub(crate) schc_profile_revision: VarInt,
+    pub(crate) schc_max_decompressed_payload: usize,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
 
@@ -298,6 +302,39 @@ impl TransportConfig {
         self
     }
 
+    /// Enable SCHC-based QUIC frame-payload compression negotiation.
+    ///
+    /// Disabled by default.
+    pub fn schc_enabled(&mut self, enabled: bool) -> &mut Self {
+        self.schc_enabled = enabled;
+        self
+    }
+
+    /// SCHC profile/ruleset identifier advertised during handshake negotiation.
+    ///
+    /// Defaults to `1`.
+    pub fn schc_profile_id(&mut self, profile_id: VarInt) -> &mut Self {
+        self.schc_profile_id = profile_id;
+        self
+    }
+
+    /// SCHC profile revision advertised during handshake negotiation.
+    ///
+    /// Defaults to `1`.
+    pub fn schc_profile_revision(&mut self, profile_revision: VarInt) -> &mut Self {
+        self.schc_profile_revision = profile_revision;
+        self
+    }
+
+    /// Maximum accepted payload size after SCHC decompression.
+    ///
+    /// The value is clamped to the protocol UDP payload bounds.
+    pub fn schc_max_decompressed_payload(&mut self, value: usize) -> &mut Self {
+        self.schc_max_decompressed_payload =
+            value.clamp(usize::from(INITIAL_MTU), usize::from(MAX_UDP_PAYLOAD));
+        self
+    }
+
     /// Whether to force every packet number to be used
     ///
     /// By default, packet numbers are occasionally skipped to ensure peers aren't ACKing packets
@@ -383,6 +420,10 @@ impl Default for TransportConfig {
             allow_spin: true,
             datagram_receive_buffer_size: Some(STREAM_RWND as usize),
             datagram_send_buffer_size: 1024 * 1024,
+            schc_enabled: false,
+            schc_profile_id: VarInt(1),
+            schc_profile_revision: VarInt(1),
+            schc_max_decompressed_payload: usize::from(MAX_UDP_PAYLOAD),
             #[cfg(test)]
             deterministic_packet_numbers: false,
 
@@ -419,6 +460,10 @@ impl fmt::Debug for TransportConfig {
             allow_spin,
             datagram_receive_buffer_size,
             datagram_send_buffer_size,
+            schc_enabled,
+            schc_profile_id,
+            schc_profile_revision,
+            schc_max_decompressed_payload,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
             congestion_controller_factory: _,
@@ -451,6 +496,13 @@ impl fmt::Debug for TransportConfig {
             .field("allow_spin", allow_spin)
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
+            .field("schc_enabled", schc_enabled)
+            .field("schc_profile_id", schc_profile_id)
+            .field("schc_profile_revision", schc_profile_revision)
+            .field(
+                "schc_max_decompressed_payload",
+                schc_max_decompressed_payload,
+            )
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {

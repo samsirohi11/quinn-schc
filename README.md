@@ -93,6 +93,62 @@ trust-on-first-use, servers that automatically generate self-signed certificates
 should write their generated certificate to persistent storage and reuse it on
 future runs.
 
+### SCHC frame-payload compression (this fork)
+
+This fork adds experimental SCHC negotiation via QUIC transport parameters.
+Compression is negotiated only when both peers enable it and advertise a matching
+SCHC profile tuple (`TransportConfig::schc_enabled`, `schc_profile_id`,
+`schc_profile_revision`).
+When negotiated, compression is applied only to 1-RTT payloads; Initial/Handshake
+and 0-RTT payload processing remain uncompressed.
+The current frame-payload rules include generic zero-suffix elision and a
+DATAGRAM-with-length zero-tail rule, selected by profile signature at runtime.
+Per-connection SCHC counters and byte accounting are available via
+`ConnectionStats::schc`.
+`quinn-proto` also exposes an optional `schc-coreconf-backend` feature as an
+adapter hook for local `schc-coreconf` integration while keeping default builds
+unchanged.
+
+#### Benchmarking SCHC on/off
+
+Use identical workloads and only toggle SCHC flags.
+
+1. `quinn-proto` deterministic A/B check:
+
+```bash
+cargo test -p quinn-proto datagram_schc_ab_udp_bytes --lib
+```
+
+2. `bench` bulk benchmark:
+
+```bash
+# baseline (SCHC off)
+cargo run -p bench --bin bulk -- --stats --streams 16 --download-size 64M
+
+# variant (SCHC on)
+cargo run -p bench --bin bulk -- --stats --streams 16 --download-size 64M \
+  --schc --schc-profile-id 9 --schc-profile-revision 1
+```
+
+3. `perf` benchmark (client/server):
+
+```bash
+# server
+cargo run -p perf --bin perf -- server --conn-stats
+
+# client baseline
+cargo run -p perf --bin perf -- client --duration 30 --conn-stats
+
+# client SCHC
+cargo run -p perf --bin perf -- client --duration 30 --conn-stats \
+  --schc --schc-profile-id 9 --schc-profile-revision 1
+```
+
+Interpretation guidance:
+- Expect `udp_tx.bytes` and `schc.tx_bytes_after` to drop for compressible payloads.
+- Expect little or no gain for incompressible/random payloads.
+- Check `schc.compress_applied`/`decompress_applied` and zero error counters for valid runs.
+
 </details>
 <p></p>
 

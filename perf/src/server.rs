@@ -7,7 +7,9 @@ use quinn::{TokioRuntime, crypto::rustls::QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
 use tracing::{debug, error, info};
 
-use crate::{CommonOpt, PERF_CIPHER_SUITES, noprotection::NoProtectionServerConfig};
+use crate::{
+    CommonOpt, PERF_CIPHER_SUITES, noprotection::NoProtectionServerConfig, print_schc_efficiency,
+};
 
 #[derive(Parser)]
 #[clap(name = "server")]
@@ -114,7 +116,9 @@ async fn conn_stats(connection: quinn::Connection, opt: Arc<Opt>) -> Result<()> 
     if opt.common.conn_stats {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            println!("{:?}\n", connection.stats());
+            let conn_stats = connection.stats();
+            println!("{conn_stats:?}\n");
+            print_schc_efficiency("Server", &conn_stats);
         }
     }
 

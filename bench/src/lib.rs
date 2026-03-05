@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
+use quinn::VarInt;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::{
     RootCertStore,
@@ -155,6 +156,15 @@ pub fn transport_config(opt: &Opt) -> quinn::TransportConfig {
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_uni_streams(opt.max_streams.try_into().unwrap());
     config.initial_mtu(opt.initial_mtu);
+    if opt.schc {
+        let profile_id = VarInt::from_u64(opt.schc_profile_id).unwrap_or(VarInt::MAX);
+        let profile_revision = VarInt::from_u64(opt.schc_profile_revision).unwrap_or(VarInt::MAX);
+        config
+            .schc_enabled(true)
+            .schc_profile_id(profile_id)
+            .schc_profile_revision(profile_revision)
+            .schc_max_decompressed_payload(opt.schc_max_decompressed_payload);
+    }
 
     let mut acks = quinn::AckFrequencyConfig::default();
     acks.ack_eliciting_threshold(10u32.into());
@@ -201,6 +211,18 @@ pub struct Opt {
     /// Starting guess for maximum UDP payload size
     #[clap(long, default_value = "1200")]
     pub initial_mtu: u16,
+    /// Enable SCHC frame-payload compression
+    #[clap(long)]
+    pub schc: bool,
+    /// SCHC profile ID
+    #[clap(long, default_value = "1")]
+    pub schc_profile_id: u64,
+    /// SCHC profile revision
+    #[clap(long, default_value = "1")]
+    pub schc_profile_revision: u64,
+    /// Maximum payload size accepted after SCHC decompression
+    #[clap(long, default_value = "65527")]
+    pub schc_max_decompressed_payload: usize,
 }
 
 fn parse_byte_size(s: &str) -> Result<u64, ParseIntError> {

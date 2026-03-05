@@ -82,6 +82,18 @@ pub struct CommonOpt {
     /// Max UDP payload size in bytes
     #[clap(long, default_value = "1472")]
     pub max_udp_payload_size: u16,
+    /// Enable SCHC frame-payload compression
+    #[clap(long)]
+    pub schc: bool,
+    /// SCHC profile ID
+    #[clap(long, default_value = "1")]
+    pub schc_profile_id: u64,
+    /// SCHC profile revision
+    #[clap(long, default_value = "1")]
+    pub schc_profile_revision: u64,
+    /// Maximum payload size accepted after SCHC decompression
+    #[clap(long, default_value = "65527")]
+    pub schc_max_decompressed_payload: usize,
     /// qlog output file
     #[cfg(feature = "qlog")]
     #[clap(long = "qlog")]
@@ -120,6 +132,17 @@ impl CommonOpt {
 
         if let Some(send_window) = self.send_window {
             transport.send_window(send_window);
+        }
+
+        if self.schc {
+            let profile_id = VarInt::from_u64(self.schc_profile_id).unwrap_or(VarInt::MAX);
+            let profile_revision =
+                VarInt::from_u64(self.schc_profile_revision).unwrap_or(VarInt::MAX);
+            transport
+                .schc_enabled(true)
+                .schc_profile_id(profile_id)
+                .schc_profile_revision(profile_revision)
+                .schc_max_decompressed_payload(self.schc_max_decompressed_payload);
         }
 
         #[cfg(feature = "qlog")]
@@ -176,6 +199,36 @@ impl CommonOpt {
 
         Ok(socket.into())
     }
+}
+
+pub fn print_schc_efficiency(label: &str, stats: &quinn::ConnectionStats) {
+    fn compression_gain_percent(before: u64, after: u64) -> f64 {
+        if before == 0 {
+            return 0.0;
+        }
+
+        100.0 * (1.0 - (after as f64 / before as f64))
+    }
+
+    let tx_ratio = compression_gain_percent(stats.schc.tx_bytes_before, stats.schc.tx_bytes_after);
+    let rx_ratio = compression_gain_percent(stats.schc.rx_bytes_before, stats.schc.rx_bytes_after);
+    let error_count = stats.schc.compress_errors + stats.schc.decompress_errors;
+
+    println!(
+        "{label} SCHC bytes: tx {} -> {} ({tx_ratio:.2}%), rx {} -> {} ({rx_ratio:.2}%)",
+        stats.schc.tx_bytes_before,
+        stats.schc.tx_bytes_after,
+        stats.schc.rx_bytes_before,
+        stats.schc.rx_bytes_after
+    );
+    println!(
+        "{label} UDP bytes: tx {}, rx {} | SCHC counters: compress_applied={}, decompress_applied={}, errors={}",
+        stats.udp_tx.bytes,
+        stats.udp_rx.bytes,
+        stats.schc.compress_applied,
+        stats.schc.decompress_applied,
+        error_count
+    );
 }
 
 pub fn parse_byte_size(s: &str) -> Result<u64, ParseIntError> {

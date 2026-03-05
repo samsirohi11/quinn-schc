@@ -26,6 +26,36 @@ impl UdpStats {
     }
 }
 
+/// Statistics about SCHC frame-payload processing
+#[derive(Default, Debug, Copy, Clone)]
+#[non_exhaustive]
+pub struct SchcStats {
+    /// Number of transmit payloads offered to the SCHC compressor
+    pub compress_attempted: u64,
+    /// Number of payloads emitted in SCHC-compressed form
+    pub compress_applied: u64,
+    /// Number of payloads sent without SCHC compression
+    pub compress_passthrough: u64,
+    /// Number of SCHC compression failures
+    pub compress_errors: u64,
+    /// Number of received payloads offered to the SCHC decompressor
+    pub decompress_attempted: u64,
+    /// Number of received payloads successfully decompressed
+    pub decompress_applied: u64,
+    /// Number of received payloads left unmodified by SCHC
+    pub decompress_passthrough: u64,
+    /// Number of SCHC decompression failures
+    pub decompress_errors: u64,
+    /// Total transmit payload bytes before SCHC processing
+    pub tx_bytes_before: u64,
+    /// Total transmit payload bytes after SCHC processing
+    pub tx_bytes_after: u64,
+    /// Total received payload bytes before SCHC processing
+    pub rx_bytes_before: u64,
+    /// Total received payload bytes after SCHC processing
+    pub rx_bytes_after: u64,
+}
+
 /// Number of frames transmitted or received of each frame type
 #[derive(Default, Copy, Clone)]
 #[non_exhaustive]
@@ -167,6 +197,8 @@ pub struct ConnectionStats {
     pub udp_tx: UdpStats,
     /// Statistics about UDP datagrams received on a connection
     pub udp_rx: UdpStats,
+    /// Statistics about SCHC payload compression/decompression on a connection
+    pub schc: SchcStats,
     /// Statistics about frames transmitted on a connection
     pub frame_tx: FrameStats,
     /// Statistics about frames received on a connection

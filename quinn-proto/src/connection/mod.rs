@@ -35,7 +35,7 @@ use crate::{
         EndpointEvent, EndpointEventInner,
     },
     token::{ResetToken, Token, TokenPayload},
-    transport_parameters::TransportParameters,
+    transport_parameters::{SCHC_VERSION, TransportParameters},
 };
 
 mod ack_frequency;
@@ -50,6 +50,9 @@ use cid_state::CidState;
 mod datagrams;
 use datagrams::DatagramState;
 pub use datagrams::{Datagrams, SendDatagramError};
+
+mod frame_compression;
+use frame_compression::FrameCompressionState;
 
 mod mtud;
 mod pacing;
@@ -76,7 +79,7 @@ use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
-pub use stats::{ConnectionStats, FrameStats, PathStats, UdpStats};
+pub use stats::{ConnectionStats, FrameStats, PathStats, SchcStats, UdpStats};
 
 mod streams;
 #[cfg(fuzzing)]
@@ -162,6 +165,7 @@ pub struct Connection {
     key_phase_size: u64,
     /// Transport parameters set by the peer
     peer_params: TransportParameters,
+    frame_compression: FrameCompressionState,
     /// Source ConnectionId of the first packet received from the peer
     orig_rem_cid: ConnectionId,
     /// Destination ConnectionId sent by the client on the first Initial
@@ -301,6 +305,7 @@ impl Connection {
             // at the 100th short-header packet.
             key_phase_size: rng.random_range(10..1000),
             peer_params: TransportParameters::default(),
+            frame_compression: FrameCompressionState::default(),
             orig_rem_cid: rem_cid,
             initial_dst_cid: init_cid,
             retry_src_cid: None,
@@ -2768,7 +2773,27 @@ impl Connection {
         number: u64,
         packet: Packet,
     ) -> Result<(), TransportError> {
-        let payload = packet.payload.freeze();
+        let mut payload = packet.payload.freeze();
+        if self.frame_compression.is_schc_enabled() && !packet.header.is_0rtt() {
+            let payload_len = payload.len() as u64;
+            self.stats.schc.decompress_attempted += 1;
+            self.stats.schc.rx_bytes_before += payload_len;
+            match self.frame_compression.decompress(payload.as_ref()) {
+                Ok(Some(decompressed)) => {
+                    self.stats.schc.decompress_applied += 1;
+                    self.stats.schc.rx_bytes_after += decompressed.len() as u64;
+                    payload = Bytes::from(decompressed);
+                }
+                Ok(None) => {
+                    self.stats.schc.decompress_passthrough += 1;
+                    self.stats.schc.rx_bytes_after += payload_len;
+                }
+                Err(err) => {
+                    self.stats.schc.decompress_errors += 1;
+                    return Err(err);
+                }
+            }
+        }
         let mut is_probing_packet = true;
         let mut close = None;
         let payload_len = payload.len();
@@ -3524,6 +3549,29 @@ impl Connection {
             }).expect("preferred address CID is the first received, and hence is guaranteed to be legal");
         }
         self.ack_frequency.peer_max_ack_delay = get_max_ack_delay(&params);
+
+        let local_schc = self.config.schc_enabled.then_some((
+            SCHC_VERSION,
+            self.config.schc_profile_id,
+            self.config.schc_profile_revision,
+        ));
+        match (local_schc, params.schc_params()) {
+            (
+                Some((local_version, local_profile_id, local_profile_revision)),
+                Some((peer_version, peer_profile_id, peer_profile_revision)),
+            ) if local_version == peer_version
+                && local_profile_id == peer_profile_id
+                && local_profile_revision == peer_profile_revision =>
+            {
+                self.frame_compression.use_schc(
+                    local_profile_id,
+                    local_profile_revision,
+                    self.config.schc_max_decompressed_payload,
+                );
+            }
+            _ => self.frame_compression.disable(),
+        }
+
         self.peer_params = params;
         self.path.mtud.on_peer_max_udp_payload_size_received(
             u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),
@@ -3639,6 +3687,12 @@ impl Connection {
             self.next_crypto.as_ref(),
         )
         .ok()?;
+
+        if self.frame_compression.is_schc_enabled() && !packet.header.is_0rtt() {
+            if let Ok(Some(decompressed)) = self.frame_compression.decompress(&packet.payload) {
+                return Some(decompressed);
+            }
+        }
 
         Some(packet.payload.to_vec())
     }

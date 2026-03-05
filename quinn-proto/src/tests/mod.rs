@@ -1913,6 +1913,114 @@ fn datagram_send_recv() {
 }
 
 #[test]
+fn datagram_send_recv_with_schc() {
+    let _guard = subscribe();
+
+    fn schc_transport() -> Arc<TransportConfig> {
+        let mut transport = TransportConfig::default();
+        transport
+            .schc_enabled(true)
+            .schc_profile_id(VarInt(9))
+            .schc_profile_revision(VarInt(1))
+            .schc_max_decompressed_payload(2048);
+        Arc::new(transport)
+    }
+
+    let mut client = client_config();
+    client.transport = schc_transport();
+
+    let mut server = server_config();
+    server.transport = schc_transport();
+
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, server_ch) = pair.connect_with(client);
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+
+    const DATA: &[u8] = &[0; 256];
+    pair.client_datagrams(client_ch)
+        .send(DATA.into(), true)
+        .unwrap();
+    pair.drive();
+
+    assert_matches!(
+        pair.server_conn_mut(server_ch).poll(),
+        Some(Event::DatagramReceived)
+    );
+    assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA);
+    assert_matches!(pair.server_datagrams(server_ch).recv(), None);
+
+    let client_stats = pair.client_conn_mut(client_ch).stats();
+    assert!(client_stats.schc.compress_attempted > 0);
+    assert!(client_stats.schc.compress_applied > 0);
+    assert!(client_stats.schc.tx_bytes_after < client_stats.schc.tx_bytes_before);
+
+    let server_stats = pair.server_conn_mut(server_ch).stats();
+    assert!(server_stats.schc.decompress_attempted > 0);
+    assert!(server_stats.schc.decompress_applied > 0);
+    assert_eq!(server_stats.schc.decompress_errors, 0);
+}
+
+#[test]
+fn datagram_schc_ab_udp_bytes() {
+    let _guard = subscribe();
+
+    fn run_case(schc_enabled: bool) -> (ConnectionStats, ConnectionStats) {
+        fn transport_config(schc_enabled: bool) -> Arc<TransportConfig> {
+            let mut transport = TransportConfig::default();
+            transport
+                .schc_enabled(schc_enabled)
+                .schc_profile_id(VarInt(9))
+                .schc_profile_revision(VarInt(1))
+                .schc_max_decompressed_payload(4096);
+            Arc::new(transport)
+        }
+
+        let mut client = client_config();
+        client.transport = transport_config(schc_enabled);
+        let mut server = server_config();
+        server.transport = transport_config(schc_enabled);
+
+        let mut pair = Pair::new(Default::default(), server);
+        let (client_ch, server_ch) = pair.connect_with(client);
+
+        const DATAGRAMS: usize = 1;
+        const DATA: &[u8] = &[0; 512];
+        for _ in 0..DATAGRAMS {
+            pair.client_datagrams(client_ch)
+                .send(DATA.into(), true)
+                .unwrap();
+        }
+        pair.drive();
+
+        let mut received = 0;
+        while let Some(data) = pair.server_datagrams(server_ch).recv() {
+            assert_eq!(data, DATA);
+            received += 1;
+        }
+        assert_eq!(received, DATAGRAMS);
+
+        (
+            pair.client_conn_mut(client_ch).stats(),
+            pair.server_conn_mut(server_ch).stats(),
+        )
+    }
+
+    let (off_client, _off_server) = run_case(false);
+    let (on_client, on_server) = run_case(true);
+
+    assert!(
+        on_client.udp_tx.bytes < off_client.udp_tx.bytes,
+        "expected SCHC-on udp_tx.bytes < SCHC-off: on={}, off={}",
+        on_client.udp_tx.bytes,
+        off_client.udp_tx.bytes
+    );
+    assert!(on_client.schc.compress_applied > 0);
+    assert!(on_client.schc.tx_bytes_after < on_client.schc.tx_bytes_before);
+    assert!(on_server.schc.decompress_applied > 0);
+    assert_eq!(on_server.schc.decompress_errors, 0);
+}
+
+#[test]
 fn datagram_recv_buffer_overflow() {
     let _guard = subscribe();
     const WINDOW: usize = 100;

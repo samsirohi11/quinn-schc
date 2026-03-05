@@ -235,6 +235,36 @@ impl PacketBuilder {
         now: Instant,
         buffer: &mut Vec<u8>,
     ) -> (usize, bool) {
+        if self.space == SpaceId::Data
+            && conn.spaces[SpaceId::Data].crypto.is_some()
+            && conn.frame_compression.is_schc_enabled()
+        {
+            let payload_start = self.partial_encode.start + self.partial_encode.header_len;
+            if payload_start <= buffer.len() {
+                let payload_len = buffer.len() - payload_start;
+                conn.stats.schc.compress_attempted += 1;
+                conn.stats.schc.tx_bytes_before += payload_len as u64;
+
+                match conn.frame_compression.compress(&buffer[payload_start..]) {
+                    Ok(Some(compressed)) => {
+                        conn.stats.schc.compress_applied += 1;
+                        conn.stats.schc.tx_bytes_after += compressed.len() as u64;
+                        buffer.truncate(payload_start);
+                        buffer.extend_from_slice(&compressed);
+                    }
+                    Ok(None) => {
+                        conn.stats.schc.compress_passthrough += 1;
+                        conn.stats.schc.tx_bytes_after += payload_len as u64;
+                    }
+                    Err(_) => {
+                        conn.stats.schc.compress_errors += 1;
+                        conn.stats.schc.compress_passthrough += 1;
+                        conn.stats.schc.tx_bytes_after += payload_len as u64;
+                    }
+                }
+            }
+        }
+
         let pad = buffer.len() < self.min_size;
         if pad {
             trace!("PADDING * {}", self.min_size - buffer.len());

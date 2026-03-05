@@ -93,7 +93,9 @@ async fn server(endpoint: quinn::Endpoint, opt: Opt) -> Result<()> {
             }
 
             if opt.stats {
-                println!("\nServer connection stats:\n{:#?}", connection.stats());
+                let conn_stats = connection.stats();
+                println!("\nServer connection stats:\n{:#?}", conn_stats);
+                print_schc_efficiency("Server", &conn_stats);
             }
         }));
     }
@@ -165,7 +167,9 @@ async fn client(
     endpoint.wait_idle().await;
 
     if opt.stats {
-        println!("\nClient connection stats:\n{:#?}", connection.stats());
+        let conn_stats = connection.stats();
+        println!("\nClient connection stats:\n{:#?}", conn_stats);
+        print_schc_efficiency("Client", &conn_stats);
     }
 
     match first_error {
@@ -216,4 +220,34 @@ impl ClientStats {
             self.download_stats.print("download");
         }
     }
+}
+
+fn print_schc_efficiency(label: &str, stats: &quinn::ConnectionStats) {
+    fn compression_gain_percent(before: u64, after: u64) -> f64 {
+        if before == 0 {
+            return 0.0;
+        }
+
+        100.0 * (1.0 - (after as f64 / before as f64))
+    }
+
+    let tx_ratio = compression_gain_percent(stats.schc.tx_bytes_before, stats.schc.tx_bytes_after);
+    let rx_ratio = compression_gain_percent(stats.schc.rx_bytes_before, stats.schc.rx_bytes_after);
+    let error_count = stats.schc.compress_errors + stats.schc.decompress_errors;
+
+    println!(
+        "{label} SCHC bytes: tx {} -> {} ({tx_ratio:.2}%), rx {} -> {} ({rx_ratio:.2}%)",
+        stats.schc.tx_bytes_before,
+        stats.schc.tx_bytes_after,
+        stats.schc.rx_bytes_before,
+        stats.schc.rx_bytes_after
+    );
+    println!(
+        "{label} UDP bytes: tx {}, rx {} | SCHC counters: compress_applied={}, decompress_applied={}, errors={}",
+        stats.udp_tx.bytes,
+        stats.udp_rx.bytes,
+        stats.schc.compress_applied,
+        stats.schc.decompress_applied,
+        error_count
+    );
 }

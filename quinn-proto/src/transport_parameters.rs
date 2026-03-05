@@ -25,6 +25,8 @@ use crate::{
     shared::ConnectionId,
 };
 
+pub(crate) const SCHC_VERSION: VarInt = VarInt(1);
+
 // Apply a given macro to a list of all the transport parameters having integer types, along with
 // their codes and default values. Using this helps us avoid error-prone duplication of the
 // contained information across decoding, encoding, and the `Default` impl. Whenever we want to do
@@ -89,6 +91,13 @@ macro_rules! make_struct {
             /// Frequency
             pub(crate) min_ack_delay: Option<VarInt>,
 
+            /// SCHC extension version supported by this endpoint
+            pub(crate) schc_version: Option<VarInt>,
+            /// SCHC profile/ruleset identifier supported by this endpoint
+            pub(crate) schc_profile_id: Option<VarInt>,
+            /// SCHC profile revision supported by this endpoint
+            pub(crate) schc_profile_revision: Option<VarInt>,
+
             // Server-only
             /// The value of the Destination Connection ID field from the first Initial packet sent
             /// by the client
@@ -126,6 +135,9 @@ macro_rules! make_struct {
                     initial_src_cid: None,
                     grease_quic_bit: false,
                     min_ack_delay: None,
+                    schc_version: None,
+                    schc_profile_id: None,
+                    schc_profile_revision: None,
 
                     original_dst_cid: None,
                     retry_src_cid: None,
@@ -174,6 +186,9 @@ impl TransportParameters {
             min_ack_delay: Some(
                 VarInt::from_u64(u64::try_from(TIMER_GRANULARITY.as_micros()).unwrap()).unwrap(),
             ),
+            schc_version: config.schc_enabled.then_some(SCHC_VERSION),
+            schc_profile_id: config.schc_enabled.then_some(config.schc_profile_id),
+            schc_profile_revision: config.schc_enabled.then_some(config.schc_profile_revision),
             grease_transport_parameter: Some(ReservedTransportParameter::random(rng)),
             write_order: Some({
                 let mut order = std::array::from_fn(|i| i as u8);
@@ -196,12 +211,23 @@ impl TransportParameters {
             || cached.initial_max_streams_uni > self.initial_max_streams_uni
             || cached.max_datagram_frame_size > self.max_datagram_frame_size
             || cached.grease_quic_bit && !self.grease_quic_bit
+            || cached.schc_version != self.schc_version
+            || cached.schc_profile_id != self.schc_profile_id
+            || cached.schc_profile_revision != self.schc_profile_revision
         {
             return Err(TransportError::PROTOCOL_VIOLATION(
                 "0-RTT accepted with incompatible transport parameters",
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn schc_params(&self) -> Option<(VarInt, VarInt, VarInt)> {
+        Some((
+            self.schc_version?,
+            self.schc_profile_id?,
+            self.schc_profile_revision?,
+        ))
     }
 
     /// Maximum number of CIDs to issue to this peer
@@ -381,6 +407,27 @@ impl TransportParameters {
                         w.write(x);
                     }
                 }
+                TransportParameterId::SchcVersion => {
+                    if let Some(x) = self.schc_version {
+                        w.write_var(id as u64);
+                        w.write_var(x.size() as u64);
+                        w.write(x);
+                    }
+                }
+                TransportParameterId::SchcProfileId => {
+                    if let Some(x) = self.schc_profile_id {
+                        w.write_var(id as u64);
+                        w.write_var(x.size() as u64);
+                        w.write(x);
+                    }
+                }
+                TransportParameterId::SchcProfileRevision => {
+                    if let Some(x) = self.schc_profile_revision {
+                        w.write_var(id as u64);
+                        w.write_var(x.size() as u64);
+                        w.write(x);
+                    }
+                }
                 id => {
                     macro_rules! write_params {
                         {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
@@ -479,6 +526,27 @@ impl TransportParameters {
                 TransportParameterId::MinAckDelayDraft07 => {
                     params.min_ack_delay = Some(r.get().unwrap())
                 }
+                TransportParameterId::SchcVersion => {
+                    let value = r.get::<VarInt>()?;
+                    if len != value.size() || params.schc_version.is_some() {
+                        return Err(Error::Malformed);
+                    }
+                    params.schc_version = Some(value);
+                }
+                TransportParameterId::SchcProfileId => {
+                    let value = r.get::<VarInt>()?;
+                    if len != value.size() || params.schc_profile_id.is_some() {
+                        return Err(Error::Malformed);
+                    }
+                    params.schc_profile_id = Some(value);
+                }
+                TransportParameterId::SchcProfileRevision => {
+                    let value = r.get::<VarInt>()?;
+                    if len != value.size() || params.schc_profile_revision.is_some() {
+                        return Err(Error::Malformed);
+                    }
+                    params.schc_profile_revision = Some(value);
+                }
                 _ => {
                     macro_rules! parse {
                         {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
@@ -511,6 +579,16 @@ impl TransportParameters {
             // https://www.rfc-editor.org/rfc/rfc9000.html#section-4.6-2
             || params.initial_max_streams_bidi.0 > MAX_STREAM_COUNT
             || params.initial_max_streams_uni.0 > MAX_STREAM_COUNT
+            || {
+                let schc_version = params.schc_version.is_some();
+                let schc_profile = params.schc_profile_id.is_some();
+                let schc_revision = params.schc_profile_revision.is_some();
+                !(schc_version == schc_profile && schc_profile == schc_revision)
+            }
+            || params.schc_version.is_some_and(|version| version.0 == 0)
+            || params
+                .schc_profile_revision
+                .is_some_and(|revision| revision.0 == 0)
             // https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-08.html#section-3-4
             || params.min_ack_delay.is_some_and(|min_ack_delay| {
                 // min_ack_delay uses microseconds, whereas max_ack_delay uses milliseconds
@@ -641,11 +719,16 @@ pub(crate) enum TransportParameterId {
 
     // https://datatracker.ietf.org/doc/html/draft-ietf-quic-ack-frequency#section-10.1
     MinAckDelayDraft07 = 0xFF04DE1B,
+
+    // Private-use extension IDs for SCHC negotiation.
+    SchcVersion = 0x173E00,
+    SchcProfileId = 0x173E01,
+    SchcProfileRevision = 0x173E02,
 }
 
 impl TransportParameterId {
     /// Array with all supported transport parameter IDs
-    const SUPPORTED: [Self; 21] = [
+    const SUPPORTED: [Self; 24] = [
         Self::MaxIdleTimeout,
         Self::MaxUdpPayloadSize,
         Self::InitialMaxData,
@@ -667,6 +750,9 @@ impl TransportParameterId {
         Self::RetrySourceConnectionId,
         Self::GreaseQuicBit,
         Self::MinAckDelayDraft07,
+        Self::SchcVersion,
+        Self::SchcProfileId,
+        Self::SchcProfileRevision,
     ];
 }
 
@@ -706,6 +792,9 @@ impl TryFrom<u64> for TransportParameterId {
             id if Self::RetrySourceConnectionId == id => Self::RetrySourceConnectionId,
             id if Self::GreaseQuicBit == id => Self::GreaseQuicBit,
             id if Self::MinAckDelayDraft07 == id => Self::MinAckDelayDraft07,
+            id if Self::SchcVersion == id => Self::SchcVersion,
+            id if Self::SchcProfileId == id => Self::SchcProfileId,
+            id if Self::SchcProfileRevision == id => Self::SchcProfileRevision,
             _ => return Err(()),
         };
         Ok(param)
@@ -743,6 +832,9 @@ mod test {
             }),
             grease_quic_bit: true,
             min_ack_delay: Some(2_000u32.into()),
+            schc_version: Some(VarInt(1)),
+            schc_profile_id: Some(VarInt(7)),
+            schc_profile_revision: Some(VarInt(3)),
             ..TransportParameters::default()
         };
         params.write(&mut buf);
@@ -846,6 +938,10 @@ mod test {
                     stateless_reset_token: [0xab; RESET_TOKEN_SIZE].into(),
                 })
             }),
+            Box::new(|t| {
+                // SCHC parameters must be sent as a complete tuple.
+                t.schc_version = Some(VarInt(1));
+            }),
         ];
 
         for mut builder in illegal_params_builders {
@@ -873,5 +969,17 @@ mod test {
         };
         high_limit.validate_resumption_from(&low_limit).unwrap();
         low_limit.validate_resumption_from(&high_limit).unwrap_err();
+    }
+
+    #[test]
+    fn resumption_params_validation_schc() {
+        let cached = TransportParameters {
+            schc_version: Some(VarInt(1)),
+            schc_profile_id: Some(VarInt(7)),
+            schc_profile_revision: Some(VarInt(1)),
+            ..TransportParameters::default()
+        };
+        let current = TransportParameters::default();
+        current.validate_resumption_from(&cached).unwrap_err();
     }
 }

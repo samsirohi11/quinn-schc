@@ -18,7 +18,7 @@ use tracing::{debug, error, info};
 use crate::{
     CommonOpt, PERF_CIPHER_SUITES,
     noprotection::NoProtectionClientConfig,
-    parse_byte_size,
+    parse_byte_size, print_schc_efficiency,
     stats::{OpenStreamStats, Stats},
 };
 
@@ -181,7 +181,9 @@ pub async fn run(opt: Opt) -> Result<()> {
                 if allow_table_output {
                     stats.print();
                     if opt.common.conn_stats {
-                        println!("{:?}\n", connection.stats());
+                        let conn_stats = connection.stats();
+                        println!("{conn_stats:?}\n");
+                        print_schc_efficiency("Client", &conn_stats);
                     }
                 }
             }
